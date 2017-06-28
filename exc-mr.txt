@@ -1,0 +1,463 @@
+Pierre Pauly
+s0836497
+level 10
+
+............................ Extreme Computing ............................
+-------------------------- Map Reduce Assignment --------------------------
+
+This document contains the explanations and justifications of the approaches chosen to solve the tasks given in the second assignment in Extreme Computing.
+The relevant code is send together with this document.
+
+------- Task 1 --------
+
+Code: Unixversion.py
+
+The first difficulty of this task arose due to the relatively loosely constrained formatting of the training file. The script should be able to extract text of an html file, ignoring html tags, scripts and style sheets, and should handle badly formatted or broken html tags relatively well. 
+To filter the html tags from the text I used lxml, a third-party python module which showed better performance than other available modules (Beautiful Soup, nltk ...). (Performance Source: http://tinyurl.com/cyvumhv)
+After having stripped the html tags, I removed all the excessive spaces, punctuation and numbers from the text using regular expressions. (Regex performance source: http://tinyurl.com/ydj5fo7)
+
+The second part of this task constituted in implementing a Naive Bayes classifier in order to predict whether or not a given word should be capitalized.
+The classifier needs to be trained before it can predict on new words, meaning that the words of a text file (the training set) are taken as representative examples for good capitalization. The circumstances when a capitalized word appears are then analysed by splitting the words into features as given in the assignment: the word itself, the last two letters, the last three letters, the first two letters, the first three letters. Every feature has a unique identifier index, a number between 0 and 4 (at max.). 
+For example:	the word "cloud" is split into its features: 'cloud', 'ud', 'oud', 'cl', 'clo'. 
+				with "cloud"'s 2nd feature being 'ud' (feature index = 1)
+
+With the help of a map (dictionary in python) I counted the occurrences of a (feature, index, label) element and stored them in the map. Which results in counting how many times 'cl' were the beginning two characters of a capitalized string.
+The code illustrates how the training document is scanned and the whole process in obtaining the frequencies. 
+Using the Naive Bayes assumption of independence between the different counted events, I calculated the probabilities of a word being capitalized or not. The higher probability wins and determines the case. 
+
+To run my script, the easiest and most insightful is most likely to run it in 'debug' mode, by running:
+python Unixversion.py -d <pathToTestFile>
+
+where the test file is the .txt file which is to be capitalized.
+The default training .txt file is small.txt (which was supplied).
+The script will not overwrite the supplied file but instead create a new file in the working directory. This file is has the file name of the test file ending with "-capitalized.txt".
+
+(see comments in the Unixversion.py file for more detailed descriptions of how this is done) 
+
+
+------- Task 2 --------
+
+Code: FeaturesEmitter-mapper.py, Features-reducer.py
+
+In order to migrate the Naive Bayes classifier to the Hadoop cluster, a mapper and a reducer script had to be written. 
+
+The mapper simply reads a line at a time from the input buffer stdin. Since we are assuming the training data to be a possibly horribly formatted html file, the read line is sanitized from the special characters and punctuation, only extracting the words from it.
+The words are split up in features and are emitted to the stdout for the reducer to handle. 
+This is the simplest way to count the features. It's analogous to distributing puzzle pieces to different piles and let the reducer count the pieces in a pile. 
+So that's exactly what the reducer does. It groups the mapper's outputs together according to feature, index and label and counts them. Additionally, since we already have the frequencies of the features we can gather all the necessary pieces and calculate the probability p(fi|l) for every feature f and index i given label l. The probabilities are emitted to stdout again, together with the feature, index, label, and the frequency. 
+
+This approach was relatively easy to implement and also pretty efficient.
+I added a flush condition to the reducer since it stores data and might at some point store to much data which it should get rid of. Thus as soon as the frequency counting dictionary (dict) grows over 10'000 entries it will print the values to stdout and clear the dict. 
+
+I've also attempted to use hashed keys instead of the tab-separated values. This approach had the potential to be more efficient as through clever hashing of the keys the workload could be spread more evenly over the reducers, maximizing their potential.
+Although it seemed to run a couple of seconds faster than the simple version, I ran into trouble when trying to calculate the probabilities. It appeared to be impossible for the reducer to find the 'other' frequency in the dictionary, resulting in always emitting 1.000000 as probability. By the 'other' frequency I mean freq(fi|True) when p(fi|False) is to be calculated and freq(fi|False) is given by the current line. (and vis-versa)
+(The code for this is not included as it failed to run correctly, can be send upon request.)
+
+
+-------- Task 3 --------
+
+Code: FeaturesEmitter-mapper.py (same as in Task2), Task3-reducer.py
+
+Task 3 was a simple task of making the mapper read and filter the input and split the word into features, attach the feature index and label and emitting everything for the reducer to sum it all up. 
+
+An alternative way to the way I did it in the end would be to us the '-reducer aggregate' job configuration. This would automatically put up reducers to sum the counts of the values printed as follows: ’LongValueSum:%s\t%d’ % (id, count)
+The feature, index and label could be hashed together into an id, as proposed in Task 2. This works but turned out to be quite a bit slower than using a custom reducer.
+Thus instead my mapper is emitting rows of feature, index, label values (no count necessary as they symbolize one entry already). 
+My reducer then, similarly to task 2 counts those entries and emits the same values followed by a count. 
+The only difference to the reducer in task 2 is that it doesn't calculate the probabilities.  
+
+-------- Task 4 --------
+
+Code: Task4-mapper.py, Task4-reducer.py, + Task 2 code + Task 3 code (minimally modified)
+
+This task is done is three Hadoop jobs. 
+The first Hadoop job uses the code of task 2 to generate the training set, ie. the feature keys and the probabilities. After the job finished its output is moved to the local machine and will be referred to as the training set. 
+The second Hadoop job builds the feature set of the test file by using the code of task 3 with a minor modification: a marker character '@' is attached infront of the first value of each line. After the job is finished its output is redirected to the input directory and the training set is copied into the input directory as well.
+
+The third Hadoop job is the actual task 4 job. Its mapper analyses the combined inputs (training set and test file features). If a training set line is seen the data it holds is stored in a dictionary. Every value is only seen once so there should be no problems maintaining this dict. A test file feature line is recognized by the marker '@' in the beginning of the line and can thus be parsed accordingly. The mapper gathers the probabilities of the features and multiplies them together to get the final probability P(label|Word). This is done for both possible labels and the result is printed to stdout.
+The reducer compares the P(True|Word) and P(False|Word), if the first is highest then the word is capitalized else it is printed out in lower-case. (This could have been done by the mapper as well, but I wanted to split the work up a bit).
+
+
+-------- Task 5 --------
+
+Code: Task 4 + Task 1
+
+Overall the Unixversion of the capitalizer is faster when running on a small dataset, but as the sets become sufficiently big Hadoops overhead becomes affordable for the performance boost. Nevertheless the fastest job I ran on the large.txt set took 29 minutes to complete. 
+Also what influences the performance of Hadoop a lot is the stability of the mapper and reducer instances. Many times they crashed and it took some time for the remaining reducers to catch up again. 
+
+But the actual Naive Bayes classifier which was trained with a large data file 'saw' more words thus its performance improves compared to the Unixversion. 
+
+Also what should be mentioned is that Hadoop seems to be very moody in accepting code. What I mean is that python doesn't always behave as expected. Some functions don't seem to have any effect what so ever, leaving the programmer staring at 10 lines of code for an amazingly large amount of time. 
+ 
+
+
+##################-------------------------------------#######################
+								  Code
+##################-------------------------------------#######################
+
+#### ---------------------------- Task 1 ---------------------------- ####
+						      Unixversion.py
+
+#!/usr/bin/python
+
+##
+#   Pierre Pauly
+#   s0836497	
+#   level 10
+##
+import sys, re, string
+from lxml import html
+from lxml.html.clean import clean_html
+
+class SimpleCaps:
+	""" Simple word capitalizing script using Naive Bayes. (Unix version) """
+
+	##
+	#   init 
+	#
+	#   params:	debug, boolean flag which turns debug messages on/off. 
+	#			filename, 	path to training set (txt file).
+	#						default if none given is './small.txt'
+	##
+	def __init__(self, debug = False, filename = '../files/small.txt'):
+		self.freqs = {}
+		#self.wordbag = []
+		self.p = {}
+		self.debugMode = debug
+		self.train(filename)
+		
+	def train(self, filename = '../files/small.txt'):	
+		wordlist = ""
+		
+		#	filter all html (script etc) tags out of the file
+		tree = html.parse(filename)
+		tree = clean_html(tree)
+		text = tree.getroot().text_content()
+
+		wordlist =  re.compile(r'[a-zA-Z]+').findall(text)
+		
+		if (self.debugMode):
+			print ("\nFiltered and split training set, first 10 elements are:")
+			for i in wordlist[0:10]:
+				print (i)
+
+		#	split into features for Naive Bayes training
+		self.createFeatures(wordlist)
+
+	##
+	#   Task 1.
+	#   Use the following set of features:
+	#	   the word itself,
+	#	   the last two letters,
+	#	   the last three letters,
+	#	   the first two letters,
+	#	   the first three letters.
+	#
+	#   label:  1 if word is capitalized (any letter is upper case),
+	#		   	0 otherwise (digit)
+	#
+	#   freqDict:   dictionary (map) containing the frequencies of the words appearing of the form:
+	#			   	key: (feature, featureIndex, label)
+	#			   	value: number of occurances 
+	##
+	def createFeatures(self,words):
+		self.freqs = {}
+		for word in words:
+			label = (not word.isdigit()) & (not word.islower())
+			word = word.lower()
+			if (len(word)>2):
+				features = [ word, word[-2:], word[-3:], word[0:2], word[0:3] ]
+			else:
+				if (len(word)>1):
+					features = [ word, word[-2:], word[0:2] ]
+				else:
+					features = [ word ]
+			# and count the frequencies of the individual (feature, label) pairs
+			for i in range(0,len(features)):
+				k = (features[i],i,label)
+				self.freqs[k] = self.freqs.get(k,0) + 1
+		
+		if (self.debugMode):
+			print ("\nFrequency dictionary created, first few results:\n")
+			print "%r" % self.freqs.items()[0:4]
+
+	##
+	#	calc_fil_prop
+	#
+	#	params:	fi, the word to be looked up, 
+	#			l,	the label. can be either True or False
+	#	returns: p, s.t.
+	#				   					freq(fi,l)
+	#				p(fi|l) = 	-------------------------
+	#							 freq(fi,0) + freq(fi,1)
+	#
+	##
+	def calc_fil_prob(self,f,i,l):
+		# get the 'other' frequency count
+		fo = self.freqs.get((f,i,int(not l)),0.000001)
+		f = self.freqs.get((f,i,l),0.000001)
+		p = f / float(fo + f)
+		return p
+
+	##
+	#	calc_props
+	#
+	#	params: p, 	dictionary containing the probabilities p(fi|l)
+	# 				to be used in the Naive Bayes model.
+	#				
+	##
+	def calc_fil_probs(self,p):
+		if (self.freqs == {}):
+			self.train()
+
+		for (f,i,l) in self.freqs.keys():
+			if (not p.__contains__((f,i,l))):
+				p[(f,i,l)] = self.calc_fil_prob(f,i,l)
+			else: 
+				p[(f,i,l)] = (p[(f,i,l)] + self.calc_fil_prob(f,i,l)) /2.0
+		return p
+	
+	def calc_p(self, label, word):
+		if (self.p == {}):
+			self.init_NB_model()
+
+		if (len(word)>2):
+			features = [ word, word[-2:], word[-3:], word[0:2], word[0:3] ]
+		else:
+			if (len(word)>1):
+				features = [ word, word[-2:], word[0:2] ]
+			else:
+				features = [ word ]
+		# and count the frequencies of the individual (feature, label) pairs
+		multi = 1
+		for i in range(0,len(features)):
+			k = (features[i],i,label)
+			multi *= self.p.get(k,1)
+		return multi
+
+	def init_NB_model(self):
+		self.p = self.calc_fil_probs({})
+		if (self.debugMode):
+			print ("\nCalculating probabilites p(fi|l), 3 examples:\n")
+			print  "p(%s) = %f" % (self.p.items()[0][0],self.p.items()[0][1]) 
+			print  "p(%s) = %f" % (self.p.items()[1][0],self.p.items()[1][1])
+			print  "p(%s) = %f" % (self.p.items()[2][0],self.p.items()[2][1])
+	
+	##
+	#	adjust_case
+	#
+	#	params: word, the word whose case is to be analysed, and modified
+	#
+	#	return: word, the word with the correct case. (according to 
+	#				  the Naive Bayes model.
+	#
+	#	description: 	Uses Naive Bayes assumptions and previously 
+	#					counted frequencies to predict the case of the 
+	#					first letter of the given word.
+	#
+	##
+	def adjust_case(self, word):
+		if (self.p == {}):
+			self.init_NB_model()
+		word = word.strip()
+		if ((word != None) & (word != '')): 
+			pT = self.calc_p(True,word)
+			pF = self.calc_p(False,word)
+			if (pT > pF):
+				word = word.capitalize()
+				#if (self.debugMode):
+				#	print ('p(T|',word,') = ', pT, '\np(F|',word,') = ',pF,'\nresult: ', word, 'with ', pT*100, '% certainty')
+			else:
+				word = word.lower()
+				#if (self.debugMode):
+				#	print ('p(T|',word,') = ', pT, '\np(F|',word,') = ',pF,'\nresult: ', word, 'with ', pF*100, '% certainty')
+		return word
+
+def main():
+	try:
+		l = len(sys.argv)
+		trainingfile = ''
+		if (l == 5):
+			if ((sys.argv[1] == '-d') & (sys.argv[2] == '-t')):
+				debugMode = True
+				trainingfile = sys.argv[3]
+			else:
+				sys.exit("Unsupported parameter. Correct syntax:\npython3 Unixversion [-d|-t trainingfile.txt] <target.txt>")
+		elif (l == 3):
+			param = sys.argv[1]
+			if (param == '-d') :
+				debugMode = True
+			elif (param == '-t'):
+				trainingfile = sys.argv[2]
+		elif (l != 2): 
+			sys.exit("Parameter(s) missing. Please at least specify a document to be analysed.")
+
+		target = sys.argv[-1]
+		# assuming the target file as only on word per line
+		f = open(target, "r")
+		doc = f.readlines()
+		f.close()
+		
+		if (trainingfile != ''):
+			c = SimpleCaps(debugMode,trainingfile)
+		else:
+			c = SimpleCaps(debugMode)
+		c.init_NB_model()
+		
+		f = open(target[0:-4]+"-capitalized.txt","w")
+		for word in doc:
+			w = c.adjust_case(word)
+			f.write(w+'\n')
+		f.close()
+	except:
+		# handle exceptions
+		if (IOError):
+			print (sys.argv[-1], len(sys.argv))
+			sys.exit("invalid filename. Unable to open file: "+sys.argv[-1])
+	else:
+		return 0 # exit errorlessly
+
+if __name__ == '__main__':
+	main()
+
+
+#### ---------------------------- Task 2 ---------------------------- ####
+						    Features-reducer.py
+
+#!/usr/bin/python
+
+import sys
+
+feature2count = {}	
+
+for line in sys.stdin:
+#for line in ["word	0	0	4"]:
+	# split into words
+	line = line.strip()
+	feat, index, label = line.split('\t')
+	
+	# this is the final feature count  of that kind since they are all 
+	# directed to the same reducer.
+	k = (feat, index, label)
+	feature2count[k] = int(feature2count.get(k,0)) + 1
+	
+	if (len(feature2count) > 10000):
+		for (f,i,l),c in feature2count.items():
+			#print (f,i,l,(l!=True),c)
+			co = feature2count.get((f,i,(l!=True)),0.000001)
+			p = float(c) / float(c + co)
+			print "%s\t%d\t%d\t%d\t%d\t%f" % (f, int(i), int(l), int(c), int(co), p) 
+	
+for (f,i,l),c in feature2count.items():
+	#print (f,i,l,(l!=True),c)
+	co = feature2count.get((f,i,(l!=True)),0.000001)
+	p = float(c) / float(c + co)
+	print "%s\t%d\t%d\t%d\t%d\t%f" % (f, int(i), int(l), int(c), int(co), p) 
+
+
+#### ------------------------ Task2 & Task 3 ------------------------- ####
+						 FeaturesEmitter-mapper.py
+
+#!/usr/bin/python
+
+import sys, re
+
+for line in sys.stdin:
+
+	# split into words
+	words =  re.compile(r'[a-zA-Z]+').findall(line)
+
+	for word in words:
+		label = (not word.isdigit()) & (not word.islower())
+		if (len(word)>2):
+			fs = [word, word[-2:], word[-3:], word[0:2], word[0:3]]
+		else:
+			if (len(word)>1):
+				fs = [word, word[-2:], word[0:2]]
+			else:
+				fs = [word]
+		for i in range(0,len(fs)): 
+			print "%s\t%d\t%d" % ( fs[i].lower(), i, label)
+
+
+#### ---------------------------- Task 3 ---------------------------- ####
+							Task3-reducer.py
+
+#!/usr/bin/python
+
+import sys
+
+feature2count = {}	
+
+for line in sys.stdin:
+	# split into words
+	line = line.strip()
+	feat, index, label = line.split('\t')
+	
+	k = (feat, index, label)
+	feature2count[k] = int(feature2count.get(k,0)) + 1
+	
+	if (len(feature2count) > 10000):
+		for (f,i,l),c in feature2count.items():
+			print "%s\t%d\t%d\t%d" % (f, int(i), int(l), int(c)) 
+	
+for (f,i,l),c in feature2count.items():
+	print "%s\t%d\t%d\t%d" % (f, int(i), int(l), int(c)) 
+
+
+#### ---------------------------- Task 4 ---------------------------- ####
+							 Task4-mapper.py
+
+#!/usr/bin/python
+
+import sys
+
+ps = {}	
+
+for line in sys.stdin:
+#for line in ["bye	0	0	88	33	0.777","@hello	0	0	99"]:
+	# split into words
+	line = line.strip()
+	params = line.split('\t')
+
+	# is the current line from the test set? -> @ marker
+	# [word, word[-2:], word[-3:], word[0:2], word[0:3]]
+	if (params[0][0] == '@'):
+		feat = params[0][1:]
+		i = params[1]		
+		l = params[2]
+		k = (feat,i,l) 
+		ilist = [0]
+		if ((i==2)|(i==4)|((i==0)&(len(feat) > 2))):
+			ilist = [0,1,2,3,4]
+		elif ((i==1) | (i==3)| ((i==0)&(len(feat) > 1))):
+			ilist = [0,1,3]
+		pT = 1
+		pF = 1
+		for x in ilist:
+			pT *= ps.get((feat,x,True),0.000001)
+			pF *= ps.get((feat,x,False),0.000001)
+		print "%s\t%f\t%f" % (feat, pT, pF) 
+		
+	else:
+		#training set - store in dict
+		feat, index, label, countS, countO, prob = params
+		k = (feat,index,label) 
+		ps[k] = prob
+
+#### ---------------------------- Task 4 ---------------------------- ####
+							 Task4-reducer.py
+
+#!/usr/bin/python
+
+import sys
+
+for line in sys.stdin:
+	# split into words
+	line = line.strip()
+	word, pT, pF = line.split('\t')
+	
+	if (pT < pF):
+		print word.lower()
+	else:
+		print word[0].capitalize()
